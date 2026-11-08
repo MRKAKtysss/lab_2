@@ -1,0 +1,311 @@
+#define _CRT_SECURE_NO_WARNINGS
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+
+#define MAX_WORDS     8
+#define MAX_WORD_LEN  16
+#define MAX_LETTERS   10
+#define MAX_LINE      256
+
+typedef struct {
+    char words[MAX_WORDS][MAX_WORD_LEN];
+    char ops[MAX_WORDS - 1];
+    int  num_words;
+} Expr;
+
+typedef struct {
+    Expr left;
+    char result[MAX_WORD_LEN];
+
+    char letters[MAX_LETTERS];
+    int  num_letters;
+    int  letter_idx[256];
+} Rebus;
+
+static int is_letter_char(char c) { return c >= 'A' && c <= 'Z'; }
+static int is_op_char(char c) { return c == '+' || c == '-' || c == '*' || c == '/'; }
+static int is_space_char(char c) {
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v';
+}
+
+static int parse_left(const char* s, Expr* e) {
+    e->num_words = 0;
+    int expect_word = 1;
+
+    while (*s) {
+        while (is_space_char(*s)) s++;
+        if (!*s) break;
+
+        if (expect_word) {
+            int len = 0;
+            while (*s && is_letter_char(*s)) {
+                if (len >= MAX_WORD_LEN - 1) return 0;
+                e->words[e->num_words][len++] = *s++;
+            }
+            if (len == 0) return 0;
+            e->words[e->num_words][len] = '\0';
+            e->num_words++;
+            if (e->num_words > MAX_WORDS) return 0;
+            expect_word = 0;
+        }
+        else {
+            if (!is_op_char(*s)) return 0;
+            e->ops[e->num_words - 1] = *s++;
+            expect_word = 1;
+        }
+    }
+
+    return e->num_words >= 2 && !expect_word;
+}
+
+static int parse_word(const char** s, char* out) {
+    while (is_space_char(**s)) (*s)++;
+    int len = 0;
+    while (**s && is_letter_char(**s)) {
+        if (len >= MAX_WORD_LEN - 1) return 0;
+        out[len++] = **s;
+        (*s)++;
+    }
+    if (len == 0) return 0;
+    out[len] = '\0';
+    return 1;
+}
+
+static int parse_rebus(const char* line, Rebus* r) {
+    memset(r, 0, sizeof(*r));
+
+    while (is_space_char(*line)) line++;
+
+    const char* eq = strchr(line, '=');
+    if (!eq) return 0;
+
+    size_t left_len = (size_t)(eq - line);
+    if (left_len >= MAX_LINE) return 0;
+
+    char left_buf[MAX_LINE];
+    memcpy(left_buf, line, left_len);
+    left_buf[left_len] = '\0';
+
+    if (!parse_left(left_buf, &r->left)) return 0;
+
+    const char* rs = eq + 1;
+    if (!parse_word(&rs, r->result)) return 0;
+    while (is_space_char(*rs)) rs++;
+    if (*rs != '\0') return 0;
+
+    for (int i = 0; i < 256; i++) r->letter_idx[i] = -1;
+
+    for (int i = 0; i < r->left.num_words; i++) {
+        for (char* c = r->left.words[i]; *c; c++) {
+            if (r->letter_idx[(unsigned char)*c] < 0) {
+                if (r->num_letters >= MAX_LETTERS) return 0;
+                r->letter_idx[(unsigned char)*c] = r->num_letters;
+                r->letters[r->num_letters++] = *c;
+            }
+        }
+    }
+    for (char* c = r->result; *c; c++) {
+        if (r->letter_idx[(unsigned char)*c] < 0) {
+            if (r->num_letters >= MAX_LETTERS) return 0;
+            r->letter_idx[(unsigned char)*c] = r->num_letters;
+            r->letters[r->num_letters++] = *c;
+        }
+    }
+
+    return 1;
+}
+
+static long long word_value(const char* w, const int* digits, const Rebus* r) {
+    long long v = 0;
+    for (const char* c = w; *c; c++)
+        v = v * 10 + digits[r->letter_idx[(unsigned char)*c]];
+    return v;
+}
+
+static int has_leading_zero(const Rebus* r, const int* digits) {
+    for (int i = 0; i < r->left.num_words; i++) {
+        const char* w = r->left.words[i];
+        if (strlen(w) > 1 && digits[r->letter_idx[(unsigned char)w[0]]] == 0)
+            return 1;
+    }
+    if (strlen(r->result) > 1 && digits[r->letter_idx[(unsigned char)r->result[0]]] == 0)
+        return 1;
+    return 0;
+}
+
+static int eval_expr(const Rebus* r, const Expr* e, const int* digits, long long* out) {
+    long long vals[MAX_WORDS];
+    char ops[MAX_WORDS];
+    int m = e->num_words;
+
+    for (int i = 0; i < m; i++)
+        vals[i] = word_value(e->words[i], digits, r);
+    for (int i = 0; i < m - 1; i++)
+        ops[i] = e->ops[i];
+
+    for (int i = 0; i < m - 1; ) {
+        if (ops[i] == '*' || ops[i] == '/') {
+            long long a = vals[i], b = vals[i + 1], v;
+            if (ops[i] == '*') {
+                v = a * b;
+            }
+            else {
+                if (b == 0) return 0;
+                if (a % b != 0) return 0;
+                v = a / b;
+            }
+            vals[i] = v;
+            for (int j = i + 1; j < m - 1; j++) {
+                vals[j] = vals[j + 1];
+                ops[j - 1] = ops[j];
+            }
+            m--;
+        }
+        else {
+            i++;
+        }
+    }
+
+    /* проход 2: сложение и вычитание */
+    long long acc = vals[0];
+    for (int i = 0; i < m - 1; i++) {
+        if (ops[i] == '+') acc += vals[i + 1];
+        else if (ops[i] == '-') acc -= vals[i + 1];
+        else return 0;
+    }
+
+    *out = acc;
+    return 1;
+}
+
+static int check_solution(const Rebus* r, const int* digits) {
+    if (has_leading_zero(r, digits)) return 0;
+    long long lhs;
+    if (!eval_expr(r, &r->left, digits, &lhs)) return 0;
+    long long rhs = word_value(r->result, digits, r);
+    return lhs == rhs;
+}
+
+static int digits[MAX_LETTERS];
+static int used[10];
+
+static int solve_recursive(const Rebus* r, int idx) {
+    if (idx == r->num_letters)
+        return check_solution(r, digits);
+
+    for (int d = 0; d <= 9; d++) {
+        if (used[d]) continue;
+        used[d] = 1;
+        digits[idx] = d;
+        if (solve_recursive(r, idx + 1)) return 1;
+        used[d] = 0;
+    }
+    return 0;
+}
+
+static int solve(const Rebus* r) {
+    memset(used, 0, sizeof(used));
+    return solve_recursive(r, 0);
+}
+
+static void print_solution(const Rebus* r, const int* digits) {
+    for (int i = 0; i < r->left.num_words; i++) {
+        if (i > 0) printf(" %c ", r->left.ops[i - 1]);
+        printf("%lld", word_value(r->left.words[i], digits, r));
+    }
+    printf(" = %lld\n", word_value(r->result, digits, r));
+}
+
+static void process_line(const char* line) {
+    Rebus rebus;
+    if (!parse_rebus(line, &rebus)) {
+        fprintf(stderr, "Parse error: %s", line);
+        return;
+    }
+
+    clock_t start = clock();
+    int ok = solve(&rebus);
+    clock_t end = clock();
+
+    double elapsed = (double)(end - start) / CLOCKS_PER_SEC;
+
+    if (ok)
+        print_solution(&rebus, digits);
+    else
+        printf("No solution: %s", line);
+
+    printf("Time: %.6f s\n", elapsed);
+}
+
+static void run_keyboard_mode(void) {
+    printf("Enter rebuses (empty string - exit):\n");
+
+    char line[MAX_LINE];
+    while (fgets(line, sizeof(line), stdin)) {
+        int empty = 1;
+        for (char* c = line; *c; c++)
+            if (!is_space_char(*c)) { empty = 0; break; }
+        if (empty) break;
+
+        process_line(line);
+        printf("\n");
+    }
+}
+
+static void run_file_mode(const char* path) {
+    FILE* fp = fopen(path, "r");
+    if (!fp) { perror(path); return; }
+
+    char line[MAX_LINE];
+    while (fgets(line, sizeof(line), fp))
+        process_line(line);
+
+    fclose(fp);
+}
+
+int main(int argc, char* argv[]) {
+    if (argc > 1) {
+        run_file_mode(argv[1]);
+        return 0;
+    }
+
+    printf("Choose:\n");
+    printf("1 - Enter rebus with keyboard\n");
+    printf("2 - Read from file\n");
+    printf("0 - Exit\n\n");
+    fflush(stdout);
+
+    int mode = 0;
+    if (scanf("%d", &mode) != 1) {
+        fprintf(stderr, "Incorrect choice\n");
+        return 1;
+    }
+    int ch;
+    while ((ch = getchar()) != '\n' && ch != EOF) {}
+
+    if (mode == 0) return 0;
+
+    if (mode == 1) {
+        run_keyboard_mode();
+    }
+    else if (mode == 2) {
+        char path[MAX_LINE];
+        printf("File path: ");
+        fflush(stdout);
+        if (!fgets(path, sizeof(path), stdin)) return 1;
+
+        size_t n = strlen(path);
+        while (n > 0 && (path[n - 1] == '\n' || path[n - 1] == '\r'))
+            path[--n] = '\0';
+
+        run_file_mode(path);
+    }
+    else {
+        fprintf(stderr, "Unknown mode: %d\n", mode);
+        return 1;
+    }
+
+    return 0;
+}
