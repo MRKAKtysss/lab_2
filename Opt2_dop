@@ -8,6 +8,7 @@
 #define MAX_WORD_LEN  16
 #define MAX_LETTERS   10
 #define MAX_LINE      256
+#define MAX_COLS      MAX_WORD_LEN
 
 typedef struct {
     char words[MAX_WORDS][MAX_WORD_LEN];
@@ -22,8 +23,13 @@ typedef struct {
     char letters[MAX_LETTERS];
     int  num_letters;
     int  letter_idx[256];
-
     int  is_leading[MAX_LETTERS];
+
+    int  num_cols;
+    int  col_count[MAX_COLS];
+    int  col_operand[MAX_COLS][MAX_WORDS];
+    int  col_letter[MAX_COLS][MAX_WORDS];
+    int  col_result_letter[MAX_COLS];
 } Rebus;
 
 static int is_letter_char(char c) { return c >= 'A' && c <= 'Z'; }
@@ -116,7 +122,6 @@ static int parse_rebus(const char* line, Rebus* r) {
 
     for (int i = 0; i < r->num_letters; i++)
         r->is_leading[i] = 0;
-
     for (int i = 0; i < r->left.num_words; i++) {
         const char* w = r->left.words[i];
         if (strlen(w) > 1)
@@ -125,8 +130,38 @@ static int parse_rebus(const char* line, Rebus* r) {
     if (strlen(r->result) > 1)
         r->is_leading[r->letter_idx[(unsigned char)r->result[0]]] = 1;
 
+    int max_len = (int)strlen(r->result);
+    for (int i = 0; i < r->left.num_words; i++) {
+        int wl = (int)strlen(r->left.words[i]);
+        if (wl > max_len) max_len = wl;
+    }
+    if (max_len >= MAX_COLS) return 0;
+    r->num_cols = max_len;
+
+    for (int c = 0; c < max_len; c++) {
+        r->col_count[c] = 0;
+        r->col_result_letter[c] = -1;
+    }
+
+    for (int i = 0; i < r->left.num_words; i++) {
+        const char* w = r->left.words[i];
+        int wl = (int)strlen(w);
+        for (int p = 0; p < wl; p++) {
+            int L = r->letter_idx[(unsigned char)w[wl - 1 - p]];
+            int k = r->col_count[p];
+            r->col_operand[p][k] = i;
+            r->col_letter[p][k] = L;
+            r->col_count[p]++;
+        }
+    }
+
+    int rl = (int)strlen(r->result);
+    for (int p = 0; p < rl; p++)
+        r->col_result_letter[p] = r->letter_idx[(unsigned char)r->result[rl - 1 - p]];
+
     return 1;
 }
+
 
 static long long word_value(const char* w, const int* digits, const Rebus* r) {
     long long v = 0;
@@ -148,12 +183,9 @@ static int eval_expr(const Rebus* r, const Expr* e, const int* digits, long long
     for (int i = 0; i < m - 1; ) {
         if (ops[i] == '*' || ops[i] == '/') {
             long long a = vals[i], b = vals[i + 1], v;
-            if (ops[i] == '*') {
-                v = a * b;
-            }
+            if (ops[i] == '*') v = a * b;
             else {
-                if (b == 0) return 0;
-                if (a % b != 0) return 0;
+                if (b == 0 || a % b != 0) return 0;
                 v = a / b;
             }
             vals[i] = v;
@@ -163,9 +195,7 @@ static int eval_expr(const Rebus* r, const Expr* e, const int* digits, long long
             }
             m--;
         }
-        else {
-            i++;
-        }
+        else i++;
     }
 
     long long acc = vals[0];
@@ -174,7 +204,6 @@ static int eval_expr(const Rebus* r, const Expr* e, const int* digits, long long
         else if (ops[i] == '-') acc -= vals[i + 1];
         else return 0;
     }
-
     *out = acc;
     return 1;
 }
@@ -182,33 +211,165 @@ static int eval_expr(const Rebus* r, const Expr* e, const int* digits, long long
 static int check_solution(const Rebus* r, const int* digits) {
     long long lhs;
     if (!eval_expr(r, &r->left, digits, &lhs)) return 0;
-    long long rhs = word_value(r->result, digits, r);
-    return lhs == rhs;
+    return lhs == word_value(r->result, digits, r);
 }
 
 static int digits[MAX_LETTERS];
 static int used[10];
 
-static int solve_recursive(const Rebus* r, int idx) {
+static int solve_add_col(const Rebus* r, int col, int carry);
+
+static int try_add(const Rebus* r, int col, int carry,
+    const int* list, int n, int idx) {
+    if (idx == n) {
+        int sum = carry;
+        for (int k = 0; k < r->col_count[col]; k++)
+            sum += digits[r->col_letter[col][k]];
+
+        int res = sum % 10;
+        int new_carry = sum / 10;
+
+        int rl = r->col_result_letter[col];
+        if (rl < 0) {
+            if (res != 0) return 0;
+            return solve_add_col(r, col + 1, new_carry);
+        }
+        if (digits[rl] >= 0) {
+            if (digits[rl] != res) return 0;
+            return solve_add_col(r, col + 1, new_carry);
+        }
+        if (used[res]) return 0;
+        if (res == 0 && r->is_leading[rl]) return 0;
+        digits[rl] = res;
+        used[res] = 1;
+        if (solve_add_col(r, col + 1, new_carry)) return 1;
+        used[res] = 0;
+        digits[rl] = -1;
+        return 0;
+    }
+
+    int L = list[idx];
+    for (int d = 0; d <= 9; d++) {
+        if (used[d]) continue;
+        if (d == 0 && r->is_leading[L]) continue;
+        digits[L] = d;
+        used[d] = 1;
+        if (try_add(r, col, carry, list, n, idx + 1)) return 1;
+        used[d] = 0;
+        digits[L] = -1;
+    }
+    return 0;
+}
+
+static int solve_add_col(const Rebus* r, int col, int carry) {
+    if (col == r->num_cols) return carry == 0;
+
+    int list[MAX_LETTERS];
+    int n = 0;
+    for (int k = 0; k < r->col_count[col]; k++) {
+        int L = r->col_letter[col][k];
+        if (digits[L] < 0) {
+            int dup = 0;
+            for (int j = 0; j < n; j++) if (list[j] == L) { dup = 1; break; }
+            if (!dup) list[n++] = L;
+        }
+    }
+    return try_add(r, col, carry, list, n, 0);
+}
+
+static int solve_sub_col(const Rebus* r, int col, int borrow);
+
+static int try_sub(const Rebus* r, int col, int borrow,
+    const int* list, int n, int idx) {
+    if (idx == n) {
+        int minuend = 0, subtrahends = 0;
+        for (int k = 0; k < r->col_count[col]; k++) {
+            int op = r->col_operand[col][k];
+            int v = digits[r->col_letter[col][k]];
+            if (op == 0) minuend += v;
+            else         subtrahends += v;
+        }
+        int t = minuend - subtrahends - borrow;
+        int d_c = ((t % 10) + 10) % 10;
+        int new_borrow = (d_c - t) / 10;
+
+        int rl = r->col_result_letter[col];
+        if (rl < 0) {
+            if (d_c != 0) return 0;
+            return solve_sub_col(r, col + 1, new_borrow);
+        }
+        if (digits[rl] >= 0) {
+            if (digits[rl] != d_c) return 0;
+            return solve_sub_col(r, col + 1, new_borrow);
+        }
+        if (used[d_c]) return 0;
+        if (d_c == 0 && r->is_leading[rl]) return 0;
+        digits[rl] = d_c;
+        used[d_c] = 1;
+        if (solve_sub_col(r, col + 1, new_borrow)) return 1;
+        used[d_c] = 0;
+        digits[rl] = -1;
+        return 0;
+    }
+
+    int L = list[idx];
+    for (int d = 0; d <= 9; d++) {
+        if (used[d]) continue;
+        if (d == 0 && r->is_leading[L]) continue;
+        digits[L] = d;
+        used[d] = 1;
+        if (try_sub(r, col, borrow, list, n, idx + 1)) return 1;
+        used[d] = 0;
+        digits[L] = -1;
+    }
+    return 0;
+}
+
+static int solve_sub_col(const Rebus* r, int col, int borrow) {
+    if (col == r->num_cols) return borrow == 0;
+
+    int list[MAX_LETTERS];
+    int n = 0;
+    for (int k = 0; k < r->col_count[col]; k++) {
+        int L = r->col_letter[col][k];
+        if (digits[L] < 0) {
+            int dup = 0;
+            for (int j = 0; j < n; j++) if (list[j] == L) { dup = 1; break; }
+            if (!dup) list[n++] = L;
+        }
+    }
+    return try_sub(r, col, borrow, list, n, 0);
+}
+
+static int solve_any(const Rebus* r, int idx) {
     if (idx == r->num_letters)
         return check_solution(r, digits);
 
     for (int d = 0; d <= 9; d++) {
         if (used[d]) continue;
-
         if (d == 0 && r->is_leading[idx]) continue;
-
         used[d] = 1;
         digits[idx] = d;
-        if (solve_recursive(r, idx + 1)) return 1;
+        if (solve_any(r, idx + 1)) return 1;
         used[d] = 0;
+        digits[idx] = -1;
     }
     return 0;
 }
 
+static int is_pure_op(const Expr* e, char op) {
+    for (int i = 0; i < e->num_words - 1; i++)
+        if (e->ops[i] != op) return 0;
+    return 1;
+}
+
 static int solve(const Rebus* r) {
     memset(used, 0, sizeof(used));
-    return solve_recursive(r, 0);
+    for (int i = 0; i < MAX_LETTERS; i++) digits[i] = -1;
+
+    if (is_pure_op(&r->left, '+')) return solve_add_col(r, 0, 0);
+    if (is_pure_op(&r->left, '-')) return solve_sub_col(r, 0, 0);
+    return solve_any(r, 0);
 }
 
 static void print_solution(const Rebus* r, const int* digits) {
@@ -242,14 +403,12 @@ static void process_line(const char* line) {
 
 static void run_keyboard_mode(void) {
     printf("Enter rebuses (empty string - exit):\n");
-
     char line[MAX_LINE];
     while (fgets(line, sizeof(line), stdin)) {
         int empty = 1;
         for (char* c = line; *c; c++)
             if (!is_space_char(*c)) { empty = 0; break; }
         if (empty) break;
-
         process_line(line);
         printf("\n");
     }
@@ -258,11 +417,9 @@ static void run_keyboard_mode(void) {
 static void run_file_mode(const char* path) {
     FILE* fp = fopen(path, "r");
     if (!fp) { perror(path); return; }
-
     char line[MAX_LINE];
     while (fgets(line, sizeof(line), fp))
         process_line(line);
-
     fclose(fp);
 }
 
@@ -272,22 +429,15 @@ int main(int argc, char* argv[]) {
         return 0;
     }
 
-    printf("Choose:\n");
-    printf("1 - Enter rebus with keyboard\n");
-    printf("2 - Read from file\n");
-    printf("0 - Exit\n\n");
+    printf("Choose:\n1 - Enter rebus with keyboard\n2 - Read from file\n0 - Exit\n\n");
     fflush(stdout);
 
     int mode = 0;
-    if (scanf("%d", &mode) != 1) {
-        fprintf(stderr, "Incorrect choice\n");
-        return 1;
-    }
+    if (scanf("%d", &mode) != 1) { fprintf(stderr, "Incorrect choice\n"); return 1; }
     int ch;
     while ((ch = getchar()) != '\n' && ch != EOF) {}
 
     if (mode == 0) return 0;
-
     if (mode == 1) {
         run_keyboard_mode();
     }
@@ -296,17 +446,14 @@ int main(int argc, char* argv[]) {
         printf("File path: ");
         fflush(stdout);
         if (!fgets(path, sizeof(path), stdin)) return 1;
-
         size_t n = strlen(path);
         while (n > 0 && (path[n - 1] == '\n' || path[n - 1] == '\r'))
             path[--n] = '\0';
-
         run_file_mode(path);
     }
     else {
         fprintf(stderr, "Unknown mode: %d\n", mode);
         return 1;
     }
-
     return 0;
 }
